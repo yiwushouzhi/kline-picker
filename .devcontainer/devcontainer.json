@@ -1,0 +1,24 @@
+{
+  "name": "KLinePicker Cloud Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "GitHub.vscode-pull-request-github"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+  "containerEnv": {
+    "PYTHONUTF8": "1",
+    "QT_QPA_PLATFORM": "offscreen"
+  },
+  "postCreateCommand": "python -m pip install --user -r requirements.txt",
+  "remoteUser": "vscode"
+}
