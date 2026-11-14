@@ -118,6 +118,7 @@ class KLineChart(QWidget):
         self._text_pending = None       # 按下文字标注但尚未拖动（松开即编辑）
         # 叠加品种（指数/板块日K）
         self._overlay: dict | None = None  # {code,name,kind,bars:{date:(o,h,l,c)}}
+        self._loading_text = ""         # 数据加载中的占位提示
 
     def set_bg(self, color):
         """设置背景色；网格/文字/划线等辅助色按明暗自动适配。"""
@@ -289,7 +290,13 @@ class KLineChart(QWidget):
         self._left_f = 0.0
         self.update()
 
+    def set_loading(self, text: str):
+        """加载中的占位提示；传空字符串恢复显示K线。"""
+        self._loading_text = text
+        self.update()
+
     def _load_ohlc(self, df):
+        self._loading_text = ""
         self._dates = list(df["date"])
         self._o = df["open"].to_numpy(float)
         self._h = df["high"].to_numpy(float)
@@ -1158,6 +1165,11 @@ class KLineChart(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), self._bg)
+        if self._loading_text:
+            p.setPen(self._aux["text"])
+            p.drawText(self.rect(), Qt.AlignCenter, self._loading_text)
+            p.end()
+            return
         if not self._dates or self._right() < 0:
             p.setPen(self._aux["text"])
             p.drawText(self.rect(), Qt.AlignCenter, "双击左侧结果或按方向键选择个股")

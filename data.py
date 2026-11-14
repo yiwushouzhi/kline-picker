@@ -307,6 +307,18 @@ def _write_day_cache(path: str, df: pd.DataFrame):
             pass
 
 
+def read_day_cache(code: str) -> pd.DataFrame | None:
+    """读取本地日K缓存（不校验日期），用于点击个股时先秒显已有数据。"""
+    try:
+        with open(_day_cache_path(code), "rb") as f:
+            cached = pickle.load(f)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            return cached
+    except (OSError, ValueError, EOFError, pickle.PickleError):
+        pass
+    return None
+
+
 def _slice_kline(df: pd.DataFrame, beg: str, end: str) -> pd.DataFrame:
     dates = df["date"].astype(str).str.replace("-", "", regex=False)
     return df[(dates >= beg) & (dates <= end)].reset_index(drop=True)

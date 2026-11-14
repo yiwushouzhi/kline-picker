@@ -557,6 +557,24 @@ class MinFetchThread(QThread):
             self.failed.emit(str(e))
 
 
+class DayFetchThread(QThread):
+    """后台拉取日K全历史，避免点击个股时阻塞界面。"""
+    done = Signal(str, str, str, object)   # code, name, date, df
+    failed = Signal(str, str)              # name, error
+
+    def __init__(self, code: str, name: str, date: str, parent=None):
+        super().__init__(parent)
+        self._code, self._name, self._date = code, name, date
+
+    def run(self):
+        try:
+            df = data.fetch_kline(
+                self._code, "19900101", datetime.now().strftime("%Y%m%d"))
+            self.done.emit(self._code, self._name, self._date, df)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(self._name, str(e))
+
+
 class TradeDayProbe(QThread):
     """用上证指数日K判断某日是否开市（周末已在主线程判定，无需探测）。
 
@@ -594,6 +612,11 @@ class MainWindow(QMainWindow):
         self._screener: ScreenerThread | None = None
         self._ds_thread: DeepSeekThread | None = None
         self._min_thread: MinFetchThread | None = None
+        self._day_thread: DayFetchThread | None = None
+        self._day_pending = None  # 等待中的最新日K请求 (code, name, date)
+        self._day_want = ""       # 当前希望显示的日K代码
+        self._day_shown = None    # 已显示的日K数据标识，避免重复刷新打断缩放
+        self._overlay_cache: dict = {}   # 指数/板块日K，避免每次切股重复拉取
         self._ref_date = ""      # 离开日K模式时记住的参考日（揭示日）
         self._ref_pc = 0.0       # 参考日前一交易日收盘价
         self._trade_day_cache: dict = {}   # 日期 -> 是否开市
@@ -1642,17 +1665,60 @@ class MainWindow(QMainWindow):
         # 保存上一只股票的标注
         if self._cur_draw_code and self._cur_draw_code != code:
             _save_drawings(self._cur_draw_code, self.chart.drawings())
-        try:
-            beg = "19900101"  # 图表始终加载全部历史K线
-            df = data.add_ma(data.fetch_kline(code, beg,
-                                              datetime.now().strftime("%Y%m%d")))
-        except Exception as e:  # noqa: BLE001
-            self.statusBar().showMessage(f"加载 {name} 失败: {e}")
-            return
-        self.chart.set_data(code, name, df, date)
-        # 加载本只股票的标注
-        self.chart.set_drawings(_load_drawings(code))
         self._cur_draw_code = code
+        self._day_want = code
+        self.chart.set_drawings(_load_drawings(code))
+        # 先用本地缓存秒显，网络数据在后台补齐
+        cached = data.read_day_cache(code)
+        if cached is not None:
+            self.chart.set_data(code, name, cached, date)
+            self._day_shown = self._df_key(code, cached)
+            self._after_day_chart()
+        else:
+            self.chart.clear()
+            self.chart.set_loading(f"正在加载 {name} K线…")
+        self._start_day_fetch(code, name, date)
+
+    def _start_day_fetch(self, code: str, name: str, date: str):
+        if self._day_thread is not None and self._day_thread.isRunning():
+            # 已有请求在跑：只记住最后一次，完成后再拉最新的
+            self._day_pending = (code, name, date)
+            return
+        self.statusBar().showMessage(f"加载 {name} 日K数据…")
+        self._day_thread = DayFetchThread(code, name, date, self)
+        self._day_thread.done.connect(self._on_day_done)
+        self._day_thread.failed.connect(self._on_day_failed)
+        self._day_thread.start()
+
+    def _on_day_done(self, code: str, name: str, date: str, df):
+        pending = self._day_pending
+        self._day_pending = None
+        if code == self._day_want and self._df_key(code, df) != self._day_shown:
+            self.chart.set_data(code, name, df, date)
+            self._day_shown = self._df_key(code, df)
+            self._after_day_chart()
+        if code == self._day_want:
+            self.statusBar().showMessage(f"{name} {code} 日K 命中日 {date}")
+        if pending:
+            self._start_day_fetch(*pending)
+
+    def _on_day_failed(self, name: str, msg: str):
+        pending = self._day_pending
+        self._day_pending = None
+        self.chart.set_loading("")
+        self.statusBar().showMessage(f"加载 {name} 失败: {msg}")
+        if pending:
+            self._start_day_fetch(*pending)
+
+    @staticmethod
+    def _df_key(code: str, df):
+        """日K数据指纹：代码、根数、最后日期与收盘价。"""
+        if df is None or df.empty:
+            return (code, 0, "", 0.0)
+        return (code, len(df), str(df["date"].iloc[-1])[:10],
+                float(df["close"].iloc[-1]))
+
+    def _after_day_chart(self):
         # 指数叠加保持（若已选），重绘即可
         if self.cb_index.currentIndex() > 0:
             self._on_index_changed(self.cb_index.currentIndex())
@@ -2173,21 +2239,24 @@ class MainWindow(QMainWindow):
             self._load_boards(idx)
             return
         kind, code, name, secid = spec
-        self.statusBar().showMessage(f"加载 {name} 日K数据中…")
-        try:
-            beg = "19900101"
-            end = datetime.now().strftime("%Y%m%d")
-            df = data.fetch_kline(code, beg, end, secid=secid)
+        df = self._overlay_cache.get(secid)
+        if df is None:
+            self.statusBar().showMessage(f"加载 {name} 日K数据中…")
+            try:
+                beg = "19900101"
+                end = datetime.now().strftime("%Y%m%d")
+                df = data.fetch_kline(code, beg, end, secid=secid)
+            except Exception as e:  # noqa: BLE001
+                self.statusBar().showMessage(f"{name} 加载失败：{e}")
+                self.chart.clear_overlay()
+                return
             if df is None or df.empty:
                 self.statusBar().showMessage(f"{name} 数据加载失败")
                 self.chart.clear_overlay()
                 return
-            self.chart.set_overlay(code, name, df, kind)
-            self.statusBar().showMessage(
-                f"已叠加 {name} 日K（橙/蓝蜡烛）")
-        except Exception as e:  # noqa: BLE001
-            self.statusBar().showMessage(f"{name} 加载失败：{e}")
-            self.chart.clear_overlay()
+            self._overlay_cache[secid] = df
+        self.chart.set_overlay(code, name, df, kind)
+        self.statusBar().showMessage(f"已叠加 {name} 日K（橙/蓝蜡烛）")
 
     def _load_boards(self, idx: int):
         """加载东财行业板块列表并填充下拉，随后叠加第一个板块。"""
@@ -2318,6 +2387,8 @@ class MainWindow(QMainWindow):
                          date_str: str = "", prev_close: float = 0.0):
         if self._min_thread and self._min_thread.isRunning():
             return
+        # 切到分钟/分时后，迟到的日K结果不再覆盖当前图
+        self._day_want = ""
         for b in (self.btn_trend, self.btn_m1, self.btn_m5):
             b.setEnabled(False)
         self.statusBar().showMessage(f"加载 {name} 分钟数据…")
@@ -2429,6 +2500,12 @@ class MainWindow(QMainWindow):
         if self._probe is not None and self._probe.isRunning():
             # 交易日探测是短请求，最多等 4 秒，避免线程未结束就被销毁
             self._probe.wait(4000)
+        if self._day_thread is not None and self._day_thread.isRunning():
+            # 日K请求最长约 10 秒，先等一会儿，仍未结束就强制收掉，避免退出崩溃
+            self._day_thread.wait(3000)
+            if self._day_thread.isRunning():
+                self._day_thread.terminate()
+                self._day_thread.wait(500)
         event.accept()
 
 
