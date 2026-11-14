@@ -21,6 +21,7 @@ check16.png
 # 本地密钥与系统文件
 .env
 .env.*
+.uploads/
 *.log
 *.lnk
 .DS_Store
