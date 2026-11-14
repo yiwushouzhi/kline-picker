@@ -1,7 +1,7 @@
 """K线形态选股器 主界面。
 
 用法：
-  1. 用自然语言描述形态，点「DeepSeek 生成条件」；或直接在下方编辑条件 JSON。
+  1. 用自然语言描述形态，点「① 条件梳理（AI）」；或直接在下方编辑条件 JSON。
   2. 选择日期范围和股票池，点「开始筛选」。
   3. 双击结果行，或用 ↑/↓/PgUp/PgDn 切换个股；右侧显示截至命中日的K线。
   4. 滚轮缩放、左键拖动平移；空格=揭示下一日，Shift+空格=回退一日。
@@ -31,7 +31,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog,
 
 import data
 from chart import DRAW_COLORS, KLineChart
-from deepseek_client import fix_pattern, generate_pattern, interpret_description
+from deepseek_client import (AI_PRESETS, API_URL, DEFAULT_MODEL, fix_pattern,
+                             generate_pattern, interpret_description,
+                             normalize_url, sanitize_key)
 from dsl import CompiledPattern, PatternError
 from screener import ScreenerThread
 from theme import (ACCENTS, DEFAULT_ACCENT, DEFAULT_DENSITY, DEFAULT_THEME,
@@ -428,32 +430,96 @@ class MaConfigDialog(QDialog):
         return self.sp_width.value()
 
 
+class AiConfigDialog(QDialog):
+    """AI 服务设置：服务商预设、接口地址、模型、API Key。"""
+
+    def __init__(self, conf: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI 设置")
+        self.setMinimumWidth(460)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "支持任何兼容 OpenAI chat/completions 协议的服务；"
+            "选择预设可自动填入地址与模型，也可选「自定义」手动填写。"))
+        grid = QGridLayout()
+        self.cb_provider = QComboBox()
+        self.cb_provider.addItems(list(AI_PRESETS.keys()))
+        provider = conf.get("provider") or "DeepSeek"
+        if provider in AI_PRESETS:
+            self.cb_provider.setCurrentText(provider)
+        else:
+            self.cb_provider.setCurrentText("自定义")
+        self.cb_provider.currentTextChanged.connect(self._apply_preset)
+        self.ed_base = QLineEdit(conf.get("base_url") or API_URL)
+        self.ed_base.setPlaceholderText(
+            "https://api.deepseek.com/chat/completions（可只填到 /v1）")
+        self.ed_model = QLineEdit(conf.get("model") or DEFAULT_MODEL)
+        self.ed_model.setPlaceholderText("模型名称，如 deepseek-chat")
+        self.ed_key = QLineEdit(conf.get("key") or "")
+        self.ed_key.setEchoMode(QLineEdit.Password)
+        self.ed_key.setPlaceholderText("API Key，仅保存在本机")
+        grid.addWidget(QLabel("服务商"), 0, 0)
+        grid.addWidget(self.cb_provider, 0, 1)
+        grid.addWidget(QLabel("接口地址"), 1, 0)
+        grid.addWidget(self.ed_base, 1, 1)
+        grid.addWidget(QLabel("模型"), 2, 0)
+        grid.addWidget(self.ed_model, 2, 1)
+        grid.addWidget(QLabel("API Key"), 3, 0)
+        grid.addWidget(self.ed_key, 3, 1)
+        v.addLayout(grid)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def _apply_preset(self, name: str):
+        """切换服务商时填入对应默认地址与模型（自定义不覆盖）。"""
+        base, model = AI_PRESETS.get(name, ("", ""))
+        if not base:
+            return
+        self.ed_base.setText(base)
+        self.ed_model.setText(model)
+
+    def result_conf(self) -> dict:
+        return {
+            "provider": self.cb_provider.currentText(),
+            "base_url": normalize_url(self.ed_base.text()),
+            "model": self.ed_model.text().strip() or DEFAULT_MODEL,
+            "key": sanitize_key(self.ed_key.text()),
+        }
+
+
 class DeepSeekThread(QThread):
-    """mode: interpret=整理条件(纯文本) / generate=生成公式(JSON)。"""
+    """mode: interpret=梳理条件(纯文本) / generate=生成公式(JSON)。"""
     done = Signal(dict)
     done_text = Signal(str)
     failed = Signal(str)
 
     def __init__(self, api_key: str, desc: str, mode: str = "interpret",
                  confirmed: str = "", image_b64: str = "",
-                 bad: str = "", error: str = "", parent=None):
+                 bad: str = "", error: str = "", base_url: str = "",
+                 model: str = "", parent=None):
         super().__init__(parent)
         self._key, self._desc = api_key, desc
         self._mode, self._confirmed = mode, confirmed
         self._image_b64 = image_b64
         self._bad, self._error = bad, error
+        self._base_url, self._model = base_url, model
 
     def run(self):
         try:
             if self._mode == "interpret":
                 self.done_text.emit(interpret_description(
-                    self._key, self._desc, self._image_b64))
+                    self._key, self._desc, self._image_b64,
+                    model=self._model, base_url=self._base_url))
             elif self._mode == "fix":
-                self.done.emit(fix_pattern(self._key, self._desc,
-                                           self._bad, self._error))
+                self.done.emit(fix_pattern(
+                    self._key, self._desc, self._bad, self._error,
+                    model=self._model, base_url=self._base_url))
             else:
                 self.done.emit(generate_pattern(
-                    self._key, self._desc, self._confirmed, self._image_b64))
+                    self._key, self._desc, self._confirmed, self._image_b64,
+                    model=self._model, base_url=self._base_url))
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
 
@@ -732,17 +798,18 @@ class MainWindow(QMainWindow):
         self.w_img.setVisible(False)
         v.addWidget(self.w_img)
         self.ed_interpret = QPlainTextEdit()
-        self.ed_interpret.setPlaceholderText("点「① 整理条件」后，DeepSeek 的条件理解显示在这里；可直接修改，再点「② 确认生成公式」")
+        self.ed_interpret.setPlaceholderText("点「① 条件梳理（AI）」后，AI 的条件理解显示在这里；可直接修改，再点「② 确认生成公式」")
         self.ed_interpret.setMaximumHeight(80)
         v.addWidget(self.ed_interpret)
         row = QHBoxLayout()
-        self.btn_gen = QPushButton("① DeepSeek 整理条件")
+        self.btn_gen = QPushButton("① 条件梳理（AI）")
         self.btn_gen.clicked.connect(self.on_interpret)
         self.btn_confirm = QPushButton("② 确认并生成公式")
         self.btn_confirm.setEnabled(False)
         self.btn_confirm.clicked.connect(self.on_generate)
-        btn_key = QPushButton("API Key")
-        btn_key.clicked.connect(self.on_set_key)
+        btn_key = QPushButton("AI 设置")
+        btn_key.setToolTip("选择 AI 服务商、接口地址、模型和 API Key")
+        btn_key.clicked.connect(self.on_ai_config)
         row.addWidget(self.btn_gen)
         row.addWidget(self.btn_confirm)
         row.addWidget(btn_key)
@@ -1264,15 +1331,18 @@ class MainWindow(QMainWindow):
         self.cb_patterns.blockSignals(False)
 
     def _on_pattern_selected(self, _index: int):
-        spec = self._patterns.get(self.cb_patterns.currentText())
-        if spec:
-            self.ed_dsl.setPlainText(json.dumps(spec, ensure_ascii=False, indent=2))
-            # 成套载入：形态描述
-            desc = spec.get("description", "")
-            if desc:
-                self.ed_desc.setPlainText(desc)
-            self.statusBar().showMessage(
-                f"已载入条件：{self.cb_patterns.currentText()}")
+        name = self.cb_patterns.currentText()
+        spec = self._patterns.get(name)
+        if not spec:
+            return
+        self.ed_dsl.setPlainText(json.dumps(spec, ensure_ascii=False, indent=2))
+        # 成套载入：形态描述 + AI 梳理结果 + 公式
+        desc = spec.get("description", "")
+        self.ed_desc.setPlainText(desc)
+        interpret = spec.get("interpret", "")
+        self.ed_interpret.setPlainText(interpret)
+        self.btn_confirm.setEnabled(bool(interpret.strip()))
+        self.statusBar().showMessage(f"已载入条件：{name}")
 
     def _on_pattern_save(self):
         try:
@@ -1286,8 +1356,9 @@ class MainWindow(QMainWindow):
             return
         name = name.strip()
         spec["name"] = name
-        # 成套保存：形态描述 + AI整理结果
+        # 成套保存：形态描述 + AI 梳理结果
         spec["description"] = self.ed_desc.toPlainText().strip()
+        spec["interpret"] = self.ed_interpret.toPlainText().strip()
         # 关联收藏夹
         folders, _ = _read_fav_data()
         old = _load_patterns_file().get(name, {})
@@ -1315,14 +1386,33 @@ class MainWindow(QMainWindow):
         self._refresh_patterns()
         self.statusBar().showMessage(f"条件已删除：{name}")
 
-    # ---------------- DeepSeek ----------------
-    def on_set_key(self):
-        key, ok = QInputDialog.getText(
-            self, "DeepSeek API Key", "请输入 DeepSeek API Key：",
-            QLineEdit.Password, self.settings.value("deepseek_key", ""))
-        if ok:
-            from deepseek_client import sanitize_key
-            self.settings.setValue("deepseek_key", sanitize_key(key))
+    # ---------------- AI ----------------
+    def _ai_conf(self) -> dict:
+        """读取当前 AI 配置；旧版本只存过 deepseek_key 的继续沿用。"""
+        key = str(self.settings.value("ai_key", "") or "")
+        if not key:
+            key = str(self.settings.value("deepseek_key", "") or "")
+        return {
+            "provider": str(self.settings.value("ai_provider", "DeepSeek")
+                            or "DeepSeek"),
+            "base_url": str(self.settings.value("ai_base_url", API_URL)
+                            or API_URL),
+            "model": str(self.settings.value("ai_model", DEFAULT_MODEL)
+                         or DEFAULT_MODEL),
+            "key": key,
+        }
+
+    def on_ai_config(self):
+        dlg = AiConfigDialog(self._ai_conf(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        conf = dlg.result_conf()
+        self.settings.setValue("ai_provider", conf["provider"])
+        self.settings.setValue("ai_base_url", conf["base_url"])
+        self.settings.setValue("ai_model", conf["model"])
+        self.settings.setValue("ai_key", conf["key"])
+        self.statusBar().showMessage(
+            f"AI 设置已保存：{conf['provider']} / {conf['model']}")
 
     def _attach_image(self, qimg):
         if qimg.isNull():
@@ -1335,51 +1425,56 @@ class MainWindow(QMainWindow):
         self.lb_img.setPixmap(QPixmap.fromImage(qimg).scaledToHeight(
             72, Qt.SmoothTransformation))
         self.w_img.setVisible(True)
-        self.statusBar().showMessage("已附加截图，DeepSeek 将按图理解形态")
+        self.statusBar().showMessage("已附加截图，AI 将按图理解形态")
 
     def _clear_image(self):
         self._image_b64 = ""
         self.w_img.setVisible(False)
 
     def _check_desc_key(self):
+        """返回 (形态描述, AI 配置)；任一缺失时返回空配置。"""
         desc = self.ed_desc.toPlainText().strip()
         if not desc and not self._image_b64:
             QMessageBox.information(self, "提示", "请先输入形态描述或粘贴K线截图")
-            return "", ""
-        key = self.settings.value("deepseek_key", "")
-        if not key:
-            QMessageBox.information(self, "提示", "请先点击「API Key」设置 DeepSeek API Key")
-            return "", ""
-        return desc, key
+            return "", {}
+        conf = self._ai_conf()
+        if not conf["key"]:
+            QMessageBox.information(
+                self, "提示", "请先点击「AI 设置」填写 API Key")
+            return "", {}
+        return desc, conf
 
     def on_interpret(self):
-        desc, key = self._check_desc_key()
-        if not key:
+        desc, conf = self._check_desc_key()
+        if not conf:
             return
         self.btn_gen.setEnabled(False)
-        self.btn_gen.setText("整理中…")
-        self._ds_thread = DeepSeekThread(key, desc, "interpret",
-                                         image_b64=self._image_b64, parent=self)
+        self.btn_gen.setText("梳理中…")
+        self._ds_thread = DeepSeekThread(
+            conf["key"], desc, "interpret", image_b64=self._image_b64,
+            base_url=conf["base_url"], model=conf["model"], parent=self)
         self._ds_thread.done_text.connect(self._on_interpret_done)
         self._ds_thread.failed.connect(self._on_gen_failed)
         self._ds_thread.start()
 
     def _on_interpret_done(self, text: str):
         self.btn_gen.setEnabled(True)
-        self.btn_gen.setText("① DeepSeek 整理条件")
+        self.btn_gen.setText("① 条件梳理（AI）")
         self.ed_interpret.setPlainText(text)
         self.btn_confirm.setEnabled(True)
-        self.statusBar().showMessage("条件已整理，请检查修改后点「② 确认并生成公式」")
+        self.statusBar().showMessage("条件已梳理，请检查修改后点「② 确认并生成公式」")
 
     def on_generate(self):
-        desc, key = self._check_desc_key()
-        if not key:
+        desc, conf = self._check_desc_key()
+        if not conf:
             return
         confirmed = self.ed_interpret.toPlainText().strip()
         self.btn_confirm.setEnabled(False)
         self.btn_confirm.setText("生成中…")
-        self._ds_thread = DeepSeekThread(key, desc, "generate", confirmed,
-                                         image_b64=self._image_b64, parent=self)
+        self._ds_thread = DeepSeekThread(
+            conf["key"], desc, "generate", confirmed,
+            image_b64=self._image_b64, base_url=conf["base_url"],
+            model=conf["model"], parent=self)
         self._ds_thread.done.connect(self._on_gen_done)
         self._ds_thread.failed.connect(self._on_gen_failed)
         self._ds_thread.start()
@@ -1397,10 +1492,10 @@ class MainWindow(QMainWindow):
 
     def _on_gen_failed(self, msg: str):
         self.btn_gen.setEnabled(True)
-        self.btn_gen.setText("① DeepSeek 整理条件")
+        self.btn_gen.setText("① 条件梳理（AI）")
         self.btn_confirm.setEnabled(bool(self.ed_interpret.toPlainText().strip()))
         self.btn_confirm.setText("② 确认并生成公式")
-        QMessageBox.warning(self, "DeepSeek 调用失败", msg)
+        QMessageBox.warning(self, "AI 调用失败", msg)
 
     # ---------------- 筛选 ----------------
     def _parse_pattern(self) -> CompiledPattern | None:
@@ -1413,28 +1508,30 @@ class MainWindow(QMainWindow):
             self._offer_fix("条件错误", str(e))
         return None
 
-    # ---------------- DeepSeek 纠错 ----------------
+    # ---------------- AI 纠错 ----------------
     def _offer_fix(self, title: str, err: str):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle(title)
-        box.setText(err + "\n\n是否让 DeepSeek 自动纠错？")
-        btn_fix = box.addButton("DeepSeek 纠错", QMessageBox.AcceptRole)
+        box.setText(err + "\n\n是否让 AI 自动纠错？")
+        btn_fix = box.addButton("AI 纠错", QMessageBox.AcceptRole)
         box.addButton("取消", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() is btn_fix:
             self._start_fix(err)
 
     def _start_fix(self, err: str):
-        key = self.settings.value("deepseek_key", "")
-        if not key:
-            QMessageBox.information(self, "提示", "请先点击「API Key」设置 DeepSeek API Key")
+        conf = self._ai_conf()
+        if not conf["key"]:
+            QMessageBox.information(
+                self, "提示", "请先点击「AI 设置」填写 API Key")
             return
         self.btn_scan.setEnabled(False)
-        self.statusBar().showMessage("DeepSeek 纠错中…")
+        self.statusBar().showMessage("AI 纠错中…")
         self._ds_thread = DeepSeekThread(
-            key, self.ed_desc.toPlainText().strip(), "fix",
-            bad=self.ed_dsl.toPlainText(), error=err, parent=self)
+            conf["key"], self.ed_desc.toPlainText().strip(), "fix",
+            bad=self.ed_dsl.toPlainText(), error=err,
+            base_url=conf["base_url"], model=conf["model"], parent=self)
         self._ds_thread.done.connect(self._on_fix_done)
         self._ds_thread.failed.connect(self._on_fix_failed)
         self._ds_thread.start()
@@ -1451,7 +1548,7 @@ class MainWindow(QMainWindow):
     def _on_fix_failed(self, msg: str):
         self.btn_scan.setEnabled(True)
         self.statusBar().showMessage("纠错失败")
-        QMessageBox.warning(self, "DeepSeek 纠错失败", msg)
+        QMessageBox.warning(self, "AI 纠错失败", msg)
 
     def on_scan(self):
         if self._screener and self._screener.isRunning():

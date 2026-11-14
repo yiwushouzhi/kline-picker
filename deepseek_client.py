@@ -1,4 +1,8 @@
-"""DeepSeek：自然语言形态描述 -> 条件整理 -> 筛选 DSL(JSON)。"""
+"""AI（OpenAI 兼容接口）：自然语言形态描述 -> 条件整理 -> 筛选 DSL(JSON)。
+
+默认使用 DeepSeek，也可在「AI 设置」中改用 OpenAI、通义千问、智谱等
+任意兼容 OpenAI chat/completions 协议的服务。
+"""
 from __future__ import annotations
 
 import json
@@ -6,7 +10,35 @@ import json
 import requests
 
 API_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_MODEL = "deepseek-chat"
 VISION_MODEL = "deepseek-flash"   # 支持图片输入的模型
+
+# 常用服务商预设：(接口地址, 默认模型)
+AI_PRESETS = {
+    "DeepSeek": (API_URL, DEFAULT_MODEL),
+    "OpenAI": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+    "通义千问（兼容模式）": (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "qwen-plus"),
+    "智谱 GLM": ("https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                 "glm-4-flash"),
+    "月之暗面 Kimi": ("https://api.moonshot.cn/v1/chat/completions",
+                      "moonshot-v1-8k"),
+    "自定义": ("", ""),
+}
+
+
+def normalize_url(url: str) -> str:
+    """把用户填写的接口地址补全为完整的 chat/completions 地址。"""
+    url = (url or "").strip()
+    if not url:
+        return API_URL
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    url = url.rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    return url + "/chat/completions"
 
 
 def _user_content(text: str, image_b64: str = ""):
@@ -67,10 +99,12 @@ def sanitize_key(api_key: str) -> str:
 
 
 def _chat(api_key: str, system: str, user, model: str,
-          timeout: float, json_mode: bool) -> str:
+          timeout: float, json_mode: bool, base_url: str = "") -> str:
     api_key = sanitize_key(api_key)
     if not api_key:
-        raise RuntimeError("未设置 DeepSeek API Key")
+        raise RuntimeError("未设置 API Key")
+    url = normalize_url(base_url)
+    model = (model or "").strip() or DEFAULT_MODEL
     payload = {
         "model": model,
         "messages": [
@@ -84,40 +118,40 @@ def _chat(api_key: str, system: str, user, model: str,
         payload["response_format"] = {"type": "json_object"}
     try:
         resp = requests.post(
-            API_URL, json=payload, timeout=timeout,
+            url, json=payload, timeout=timeout,
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
         )
     except requests.RequestException as e:
         raise RuntimeError(f"网络请求失败: {e}")
     if resp.status_code != 200:
-        raise RuntimeError(f"DeepSeek 返回 {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"AI 接口返回 {resp.status_code}: {resp.text[:300]}")
     try:
         return resp.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as e:
-        raise RuntimeError(f"解析 DeepSeek 响应失败: {e}")
+        raise RuntimeError(f"解析 AI 响应失败: {e}")
 
 
 def interpret_description(api_key: str, description: str, image_b64: str = "",
-                          model: str = "deepseek-chat",
-                          timeout: float = 60.0) -> str:
-    """第一步：DeepSeek 用自己的语言整理用户条件（纯文本，供用户修改确认）。"""
+                          model: str = DEFAULT_MODEL,
+                          timeout: float = 60.0, base_url: str = "") -> str:
+    """第一步：让 AI 用自己的语言整理用户条件（纯文本，供用户修改确认）。"""
     if image_b64:
         model = VISION_MODEL
         if not description.strip():
             description = "请分析这张K线截图，整理出图中所示形态的选股条件。"
     text = _chat(api_key, INTERPRET_PROMPT,
                  _user_content(description, image_b64), model, timeout,
-                 json_mode=False)
+                 json_mode=False, base_url=base_url)
     text = text.strip()
     if not text:
-        raise RuntimeError("DeepSeek 未返回条件整理")
+        raise RuntimeError("AI 未返回条件整理")
     return text
 
 
 def generate_pattern(api_key: str, description: str, confirmed: str = "",
-                     image_b64: str = "", model: str = "deepseek-chat",
-                     timeout: float = 60.0) -> dict:
+                     image_b64: str = "", model: str = DEFAULT_MODEL,
+                     timeout: float = 60.0, base_url: str = "") -> dict:
     """第二步：把（用户确认后的）条件转换成 DSL dict。失败抛 RuntimeError。"""
     if image_b64:
         model = VISION_MODEL
@@ -127,13 +161,13 @@ def generate_pattern(api_key: str, description: str, confirmed: str = "",
     try:
         content = _chat(api_key, SYSTEM_PROMPT,
                         _user_content(user, image_b64), model, timeout,
-                        json_mode=True)
+                        json_mode=True, base_url=base_url)
     except RuntimeError as e:
         # 视觉模型若不支持 response_format 则降级为纯文本再提取 JSON
         if image_b64 and "400" in str(e):
             content = _chat(api_key, SYSTEM_PROMPT,
                             _user_content(user, image_b64), model, timeout,
-                            json_mode=False)
+                            json_mode=False, base_url=base_url)
             content = (content.strip().removeprefix("```json")
                        .removeprefix("```").removesuffix("```").strip())
         else:
@@ -141,27 +175,27 @@ def generate_pattern(api_key: str, description: str, confirmed: str = "",
     try:
         spec = json.loads(content)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"解析 DeepSeek 响应失败: {e}")
+        raise RuntimeError(f"解析 AI 响应失败: {e}")
     if not isinstance(spec, dict) or not spec.get("rules"):
-        raise RuntimeError("DeepSeek 返回的内容不是有效条件 JSON")
+        raise RuntimeError("AI 返回的内容不是有效条件 JSON")
     return spec
 
 
 def fix_pattern(api_key: str, description: str, bad_content: str,
-                error: str, model: str = "deepseek-chat",
-                timeout: float = 60.0) -> dict:
-    """纠错：把出错的条件 JSON 和错误信息发回 DeepSeek，返回修正后的 DSL dict。"""
+                error: str, model: str = DEFAULT_MODEL,
+                timeout: float = 60.0, base_url: str = "") -> dict:
+    """纠错：把出错的条件 JSON 和错误信息发回 AI，返回修正后的 DSL dict。"""
     user = (f"原始需求描述：{description or '（无）'}\n\n"
             f"下面这个条件 JSON 有错误，请修正它，保持原有选股语义不变：\n"
             f"{bad_content}\n\n"
             f"错误信息：{error}\n\n"
             f"只输出修正后的完整合法条件 JSON。")
     content = _chat(api_key, SYSTEM_PROMPT, user, model, timeout,
-                    json_mode=True)
+                    json_mode=True, base_url=base_url)
     try:
         spec = json.loads(content)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"解析 DeepSeek 响应失败: {e}")
+        raise RuntimeError(f"解析 AI 响应失败: {e}")
     if not isinstance(spec, dict) or not spec.get("rules"):
-        raise RuntimeError("DeepSeek 返回的内容不是有效条件 JSON")
+        raise RuntimeError("AI 返回的内容不是有效条件 JSON")
     return spec

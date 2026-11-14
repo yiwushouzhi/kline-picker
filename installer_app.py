@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "K线形态选股器"
 APP_EXE = "KLinePicker.exe"
-APP_VER = "1.3.4"
+APP_VER = "1.3.5"
 REG_UNINSTALL = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\KLinePicker"
 CREATE_NO_WINDOW = 0x08000000
 

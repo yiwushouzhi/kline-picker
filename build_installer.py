@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 APP_DIR = os.path.join(HERE, "dist", "KLinePicker")
 PAYLOAD = os.path.join(HERE, "build", "app_payload.zip")
-SETUP_NAME = "KLinePicker_Setup_v1.3.4"
+SETUP_NAME = "KLinePicker_Setup_v1.3.5"
 
 
 def run(args: list[str]) -> None:
