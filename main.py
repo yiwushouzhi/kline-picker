@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import (QBuffer, QByteArray, QDate, QEvent, QIODevice,
@@ -616,6 +617,12 @@ class MainWindow(QMainWindow):
         self._day_pending = None  # 等待中的最新日K请求 (code, name, date)
         self._day_want = ""       # 当前希望显示的日K代码
         self._day_shown = None    # 已显示的日K数据标识，避免重复刷新打断缩放
+        # 鼠标“按下-拖动-松开”跟踪：拖选文字/拖动平移后短暂屏蔽 Insert，
+        # 防止松手瞬间的 Insert（含鼠标侧键映射）误触收藏
+        self._drag_active = False
+        self._drag_moved = False
+        self._drag_start = None
+        self._insert_block_until = 0.0
         self._overlay_cache: dict = {}   # 指数/板块日K，避免每次切股重复拉取
         self._ref_date = ""      # 离开日K模式时记住的参考日（揭示日）
         self._ref_pc = 0.0       # 参考日前一交易日收盘价
@@ -1265,7 +1272,24 @@ class MainWindow(QMainWindow):
 
     # ---------------- 全局快捷键 ----------------
     def eventFilter(self, obj: QObject, ev: QEvent) -> bool:
-        if ev.type() == QEvent.KeyPress:
+        # 跟踪鼠标拖动：拖动（拖选文字/平移K线）刚结束时屏蔽 Insert
+        et = ev.type()
+        if et == QEvent.MouseButtonPress:
+            self._drag_active = True
+            self._drag_moved = False
+            self._drag_start = ev.globalPosition().toPoint()
+        elif et == QEvent.MouseMove and self._drag_active:
+            if self._drag_start is not None and (
+                    ev.globalPosition().toPoint() - self._drag_start
+            ).manhattanLength() > 6:
+                self._drag_moved = True
+        elif et == QEvent.MouseButtonRelease:
+            if self._drag_active and self._drag_moved:
+                self._insert_block_until = time.monotonic() + 0.35
+            self._drag_active = False
+            self._drag_moved = False
+            self._drag_start = None
+        if et == QEvent.KeyPress:
             ke: QKeyEvent = ev
             focus = QApplication.focusWidget()
             if focus is self.ed_desc and ke.matches(QKeySequence.Paste):
@@ -1285,6 +1309,9 @@ class MainWindow(QMainWindow):
                     return False
                 # 正在按住鼠标（拖动选字/拖动平移）时不响应，避免误触
                 if QApplication.mouseButtons() != Qt.NoButton:
+                    return False
+                # 拖动进行中，或拖选/拖动刚结束（松手瞬间），同样不响应
+                if self._drag_active or time.monotonic() < self._insert_block_until:
                     return False
                 # 模态对话框（如均线设置）打开时不触发全局快捷键
                 if QApplication.activeModalWidget() is not None:
