@@ -319,6 +319,49 @@ def read_day_cache(code: str) -> pd.DataFrame | None:
     return None
 
 
+_SESSION_OPEN = (9, 10)     # 含集合竞价
+_SESSION_CLOSE = (15, 5)    # 收盘后再留 5 分钟缓冲
+
+
+def market_is_open(now: datetime | None = None) -> bool:
+    """是否处于 A 股交易时段（简化：工作日 09:10-15:05）。
+
+    未考虑法定节假日；节假日按“开市”处理只会导致多取几次数据，不影响正确性。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return _SESSION_OPEN <= (now.hour, now.minute) < _SESSION_CLOSE
+
+
+def _today_bar_cache_stale(cached: pd.DataFrame, mtime: datetime,
+                           now: datetime | None = None) -> bool:
+    """当日 K 线未收盘时，缓存会把早盘的半根 K 线冻结一整天，必须判为过期。
+
+    - 盘中（09:10-15:05）：缓存超过 60 秒即过期；缓存里没有当天 K 线也过期。
+    - 收盘后：若缓存是当天收盘前写入的，里面的当日 K 线是半根，过期。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5 or cached is None or getattr(cached, "empty", True):
+        return False
+    today = now.strftime("%Y-%m-%d")
+    try:
+        last = str(cached["date"].iloc[-1])[:10]
+    except Exception:  # noqa: BLE001
+        return False
+    open_t = now.replace(hour=_SESSION_OPEN[0], minute=_SESSION_OPEN[1],
+                         second=0, microsecond=0)
+    close_t = now.replace(hour=_SESSION_CLOSE[0], minute=_SESSION_CLOSE[1],
+                          second=0, microsecond=0)
+    if open_t <= now < close_t:
+        if last != today:
+            return True                       # 盘前写入，还没有当天K线
+        return (now - mtime).total_seconds() > 60
+    if now >= close_t and last == today and mtime < close_t:
+        return True                           # 拿着盘中半根K线
+    return False
+
+
 def _slice_kline(df: pd.DataFrame, beg: str, end: str) -> pd.DataFrame:
     dates = df["date"].astype(str).str.replace("-", "", regex=False)
     return df[(dates >= beg) & (dates <= end)].reset_index(drop=True)
@@ -465,6 +508,9 @@ def fetch_kline(code: str, beg: str, end: str, force: bool = False,
                     continue
                 with open(cached_path, "rb") as f:
                     cached = pickle.load(f)
+                # 当日未收盘：早盘写入的半根K线不能复用一整天
+                if _today_bar_cache_stale(cached, mtime):
+                    continue
                 if cached_path == legacy:
                     cached.attrs.update({"beg": beg, "end": end,
                                          "source": "eastmoney"})

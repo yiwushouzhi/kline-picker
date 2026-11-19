@@ -1003,7 +1003,9 @@ class MainWindow(QMainWindow):
         """日期旁标注：周末本地判定，工作日尽量用上证指数日K校验。"""
         if self.ck_today.isChecked():
             self._note_date = ""
-            self.lb_date_note.setText("")
+            # 盘中选“当日”时，命中基于未收盘的K线，收盘后可能变化
+            self.lb_date_note.setText(
+                "盘中未收盘" if data.market_is_open() else "")
             return
         qd = self.dt_date.date()
         text = f"{qd.year():04d}-{qd.month():02d}-{qd.day():02d}"

@@ -120,6 +120,9 @@ class ScreenerThread(QThread):
         else:
             pool.shutdown(wait=True)
             notes = []
+            if (self.end == datetime.now().strftime("%Y-%m-%d")
+                    and data.market_is_open()):
+                notes.append("当日未收盘，命中为盘中数据，收盘后可能变化")
             if fallback:
                 notes.append(f"{fallback} 只使用备用源")
             if fail:
