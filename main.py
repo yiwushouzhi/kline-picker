@@ -569,8 +569,9 @@ class DayFetchThread(QThread):
 
     def run(self):
         try:
-            df = data.fetch_kline(
-                self._code, "19900101", datetime.now().strftime("%Y%m%d"))
+            end = datetime.now().strftime("%Y%m%d")
+            df = data.fetch_kline(self._code, "19900101", end)
+            df = data.ensure_today_bar(df, self._code, end)
             self.done.emit(self._code, self._name, self._date, df)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(self._name, str(e))

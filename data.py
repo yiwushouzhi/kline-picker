@@ -585,6 +585,124 @@ def fetch_kline(code: str, beg: str, end: str, force: bool = False,
     return _slice_kline(df, beg, end)
 
 
+def _num(v):
+    try:
+        x = float(v)
+        return None if x != x else x
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_today_bar_em(code: str) -> dict | None:
+    """东财实时快照，用于补当日未生成的K线。"""
+    if not _source_available("em_quote"):
+        return None
+    params = {"secid": secid_of(code), "fltt": 2, "invt": 2,
+              "fields": "f43,f44,f45,f46,f47,f48,f60,f86,f168"}
+    d = None
+    for host in random.sample(_PUSH2_HOSTS, len(_PUSH2_HOSTS)):
+        try:
+            d = (_get_json(f"https://{host}/api/qt/stock/get",
+                           params, timeout=6).get("data") or {})
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if d is None:
+        _source_result("em_quote", False)
+        return None
+    _source_result("em_quote", True)
+    price, prev = _num(d.get("f43")), _num(d.get("f60"))
+    if not price or not prev:
+        return None
+    ts = _num(d.get("f86"))
+    if ts:
+        if datetime.fromtimestamp(ts).strftime("%Y-%m-%d") != _today_str():
+            return None
+    elif not market_is_open():
+        return None
+    return {"open": _num(d.get("f46")) or price,
+            "high": _num(d.get("f44")) or price,
+            "low": _num(d.get("f45")) or price,
+            "close": price, "prev": prev,
+            "volume": _num(d.get("f47")) or 0.0,
+            "amount": _num(d.get("f48")),
+            "turnover": _num(d.get("f168"))}
+
+
+def _fetch_today_bar_sina(code: str) -> dict | None:
+    """新浪实时快照（东财不可用时）。"""
+    if not _source_available("sina"):
+        return None
+    try:
+        resp = _session().get(
+            f"https://hq.sinajs.cn/list={_sina_symbol(code)}",
+            headers={"Referer": "https://finance.sina.com.cn/"},
+            timeout=(4, 8))
+        resp.raise_for_status()
+        text = resp.content.decode("gbk", "ignore")
+        body = text.split('="', 1)[1].split('"', 1)[0]
+        f = body.split(",")
+        if len(f) < 32 or not f[0] or f[30] != _today_str():
+            return None
+        price, prev = _num(f[3]), _num(f[2])
+        if not price or not prev:
+            return None
+        _source_result("sina", True)
+        return {"open": _num(f[1]) or price,
+                "high": _num(f[4]) or price,
+                "low": _num(f[5]) or price,
+                "close": price, "prev": prev,
+                "volume": (_num(f[8]) or 0.0) / 100,
+                "amount": _num(f[9]), "turnover": None}
+    except Exception:  # noqa: BLE001
+        _source_result("sina", False)
+        return None
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def ensure_today_bar(df: pd.DataFrame, code: str, end: str = "") -> pd.DataFrame:
+    """数据源还没给出当日K线时，用实时行情补一根（不写入缓存）。
+
+    仅当筛选/看图的结束日就是今天时生效，避免把今天的数据拼进历史查询。
+    """
+    if df is None or df.empty or not end:
+        return df
+    if str(end).replace("-", "")[:8] != datetime.now().strftime("%Y%m%d"):
+        return df
+    today = _today_str()
+    if str(df["date"].iloc[-1])[:10] >= today:
+        return df
+    bar = _fetch_today_bar_em(code) or _fetch_today_bar_sina(code)
+    if not bar:
+        return df
+    prev = bar["prev"]
+    last_close = float(df["close"].iloc[-1])
+    # 日K是前复权价，实时价不复权：按最后一根收盘价缩放，保持曲线连续
+    ratio = last_close / prev if prev > 0 and last_close > 0 else 1.0
+    row = {
+        "date": today,
+        "open": bar["open"] * ratio,
+        "close": bar["close"] * ratio,
+        "high": bar["high"] * ratio,
+        "low": bar["low"] * ratio,
+        "volume": bar["volume"],
+        "amount": float("nan") if bar["amount"] is None else bar["amount"],
+        "amplitude": (bar["high"] - bar["low"]) / prev * 100,
+        "pct": (bar["close"] - prev) / prev * 100,
+        "change": (bar["close"] - prev) * ratio,
+        "turnover": (float("nan") if bar["turnover"] is None
+                     else bar["turnover"]),
+    }
+    out = pd.concat([df, pd.DataFrame([row], columns=KLINE_FIELDS)],
+                    ignore_index=True)
+    out.attrs.update(df.attrs)
+    out.attrs["partial"] = True
+    return out
+
+
 def add_ma(df: pd.DataFrame, windows=(5, 10, 20, 30)) -> pd.DataFrame:
     for w in windows:
         df[f"ma{w}"] = df["close"].rolling(w).mean()

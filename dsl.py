@@ -137,6 +137,9 @@ def df_to_arrays(df) -> dict:
     for name in FIELDS:
         if name in df.columns:
             out[name] = df[name].to_numpy(dtype=float)
+    # 数据列名是 turnover，DSL 里写作 turn
+    if "turn" not in out and "turnover" in df.columns:
+        out["turn"] = df["turnover"].to_numpy(dtype=float)
     out["dates"] = list(df["date"])
     return out
 

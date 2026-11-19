@@ -48,6 +48,8 @@ class ScreenerThread(QThread):
 
     def _fetch(self, stock: dict, beg: str, end: str):
         df = data.fetch_kline(stock["code"], beg, end, force=self.force_refresh)
+        # 数据源还没生成当日K线时，用实时行情补一根，避免“当日”筛选全部为空
+        df = data.ensure_today_bar(df, stock["code"], end)
         return stock, data.add_ma(df)
 
     def run(self):
@@ -70,7 +72,7 @@ class ScreenerThread(QThread):
 
         beg = data.default_beg_for(self.start_date, self.pattern.lookback_bars())
         fetch_end = datetime.now().strftime("%Y%m%d")  # 取到今天，便于空格查看后续
-        done = fail = fallback = 0
+        done = fail = fallback = no_today = 0
         self.status.emit(f"开始筛选 {total} 只股票（数据起始 {beg}）…")
 
         # 8 并发兼顾速度与稳定性，避免高峰期限流造成时长大幅波动。
@@ -96,6 +98,9 @@ class ScreenerThread(QThread):
                 continue
             arrays = df_to_arrays(df)
             pos = date_positions(arrays["dates"])
+            if (self.end == datetime.now().strftime("%Y-%m-%d")
+                    and self.end not in pos):
+                no_today += 1
             for d in trading_days_in_range(arrays["dates"], self.start_date, self.end):
                 if self._stop:
                     break
@@ -123,6 +128,8 @@ class ScreenerThread(QThread):
             if (self.end == datetime.now().strftime("%Y-%m-%d")
                     and data.market_is_open()):
                 notes.append("当日未收盘，命中为盘中数据，收盘后可能变化")
+            if no_today:
+                notes.append(f"{no_today} 只缺少当日K线")
             if fallback:
                 notes.append(f"{fallback} 只使用备用源")
             if fail:
