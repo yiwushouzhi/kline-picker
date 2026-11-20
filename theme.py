@@ -170,6 +170,9 @@ QPushButton#danger:pressed {{ background: #b93b40; border-color: #b93b40; }}
 QWidget#note_panel {{ background: {panel2};
     border-left: 1px solid {border}; }}
 QLabel#note_title {{ color: {sub}; font-weight: 600; }}
+QPushButton#note_hide {{ background: transparent; border: none;
+    color: {sub}; font-size: 12pt; padding: 0; }}
+QPushButton#note_hide:hover {{ color: {text}; }}
 QScrollArea#note_tag_scroll {{ background: transparent; border: none; }}
 QScrollArea#note_tag_scroll QWidget {{ background: transparent; }}
 

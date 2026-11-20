@@ -674,7 +674,8 @@ class MainWindow(QMainWindow):
         self._left_panel = self._build_left()
         splitter.addWidget(self._left_panel)
         splitter.addWidget(self._build_right())
-        splitter.addWidget(self._build_note_panel())
+        self._note_panel = self._build_note_panel()
+        splitter.addWidget(self._note_panel)
         splitter.setSizes([420, 860, 170])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
@@ -698,6 +699,8 @@ class MainWindow(QMainWindow):
             splitter.restoreState(sp)
         # restoreState 会一并恢复旧版本保存的手柄宽度，需在其后重设
         splitter.setHandleWidth(7)
+        if str(self.settings.value("note_panel_visible", "1")) == "0":
+            self._set_note_panel_visible(False)
         self._apply_theme()
         self.statusBar().showMessage("就绪")
 
@@ -741,6 +744,10 @@ class MainWindow(QMainWindow):
             grp4.addAction(act)
             self._density_acts[key] = act
         menu.addSeparator()
+        self.act_note_panel = menu.addAction("显示笔记栏")
+        self.act_note_panel.setCheckable(True)
+        self.act_note_panel.setChecked(True)
+        self.act_note_panel.triggered.connect(self._set_note_panel_visible)
         menu.addAction("K线配色…", self._open_color_dialog)
         menu.addAction("K线背景颜色…", self._pick_bg)
         menu.addAction("恢复默认外观", self._reset_appearance)
@@ -1040,9 +1047,19 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
 
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
         lb_title = QLabel("笔记")
         lb_title.setObjectName("note_title")
-        v.addWidget(lb_title)
+        btn_hide = QPushButton("×")
+        btn_hide.setObjectName("note_hide")
+        btn_hide.setFixedSize(18, 18)
+        btn_hide.setCursor(Qt.PointingHandCursor)
+        btn_hide.setToolTip("隐藏笔记栏（「外观」菜单里可重新显示）")
+        btn_hide.clicked.connect(lambda: self._set_note_panel_visible(False))
+        hdr.addWidget(lb_title, stretch=1)
+        hdr.addWidget(btn_hide)
+        v.addLayout(hdr)
 
         self.btn_new_note = QPushButton("新建笔记")
         self.btn_new_note.setObjectName("danger")
@@ -1114,9 +1131,29 @@ class MainWindow(QMainWindow):
         self._note_edit_box.setVisible(False)
         self.lb_note_title.setText("")
         sizes = self._splitter.sizes()
-        if len(sizes) == 3:
+        if len(sizes) == 3 and self._note_panel.isVisible():
             sizes[2] = min(self._note_prev_width or 170, 240)
             self._splitter.setSizes(sizes)
+
+    def _set_note_panel_visible(self, visible: bool):
+        """显示/隐藏右侧笔记栏，并记住状态。"""
+        if visible:
+            self._note_panel.setVisible(True)
+            sizes = self._splitter.sizes()
+            if len(sizes) == 3 and sizes[2] < 120:
+                sizes[2] = max(self._note_prev_width, 170)
+                self._splitter.setSizes(sizes)
+        else:
+            if self._note_edit_box.isVisible():
+                self._save_current_note()
+                self._note_edit_box.setVisible(False)
+            sizes = self._splitter.sizes()
+            if len(sizes) == 3 and sizes[2] >= 120:
+                self._note_prev_width = sizes[2]
+            self._note_panel.setVisible(False)
+        self.settings.setValue("note_panel_visible", "1" if visible else "0")
+        if hasattr(self, "act_note_panel"):
+            self.act_note_panel.setChecked(visible)
 
     def _refresh_note_bar(self):
         """重建标签按钮列表并选中当前笔记。"""
