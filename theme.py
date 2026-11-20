@@ -158,4 +158,20 @@ QLabel#count {{ color: {sub}; font-weight: 600; padding: 3px 2px; }}
 QLabel#warnnote {{ color: #e8890c; font-weight: 600; }}
 QToolTip {{ background: {panel2}; color: {text};
            border: 1px solid {border}; padding: 4px 7px; border-radius: 5px; }}
+
+/* 固定红：新建笔记按钮，不跟主题强调色走 */
+QPushButton#danger {{ background: #e5484d; color: #ffffff;
+    border: 1px solid #e5484d; border-radius: 6px;
+    padding: 4px 14px; font-weight: 600; }}
+QPushButton#danger:hover {{ background: #f55a5f; border-color: #f55a5f; }}
+QPushButton#danger:pressed {{ background: #b93b40; border-color: #b93b40; }}
+
+/* 笔记标签：虚线胶囊，选中变主题强调色 */
+QPushButton#note_tag {{ background: transparent; color: {sub};
+    border: 1px dashed {border}; border-radius: 11px;
+    padding: 2px 10px; font-size: 8pt; }}
+QPushButton#note_tag:hover {{ color: {text};
+    border: 1px solid {accent}; }}
+QPushButton#note_tag:checked {{ background: {accent}; color: #ffffff;
+    border: 1px solid {accent}; font-weight: 600; }}
 """

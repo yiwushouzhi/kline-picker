@@ -15,7 +15,8 @@ import time
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import (QBuffer, QByteArray, QDate, QEvent, QIODevice,
-                            QObject, QPointF, QSettings, Qt, QThread, Signal)
+                            QObject, QPointF, QSettings, Qt, QThread,
+                            QTimer, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QIcon,
                            QKeyEvent, QKeySequence, QPainter, QPen, QPixmap,
                            QPolygonF)
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog,
                                QHeaderView, QInputDialog, QLabel, QLineEdit,
                                QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QDoubleSpinBox, QProgressBar, QPushButton,
-                               QSpinBox, QSplitter,
+                               QScrollArea, QSpinBox, QSplitter,
                                QTabWidget, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -42,6 +43,25 @@ from theme import (ACCENTS, DEFAULT_ACCENT, DEFAULT_DENSITY, DEFAULT_THEME,
 
 PATTERNS_FILE = os.path.join(data.app_data_dir(), "patterns.json")
 FAVORITES_FILE = os.path.join(data.app_data_dir(), "favorites.json")
+NOTES_FILE = os.path.join(data.app_data_dir(), "notes.json")
+
+
+def _load_notes_file() -> dict:
+    try:
+        with open(NOTES_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {str(k): str(v) for k, v in d.items()
+                if str(k).strip() and isinstance(v, str)}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_notes_file(notes: dict):
+    try:
+        with open(NOTES_FILE, "w", encoding="utf-8") as f:
+            json.dump(notes, f, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
 
 # 可叠加的指数（代码, 名称, 东财 secid）
 INDEX_LIST = [
@@ -632,6 +652,15 @@ class MainWindow(QMainWindow):
         self._probe_want = ""    # 待探测日期（用户连续改日期时只保留最后一次）
         self._probe_cur = ""     # 正在探测的日期
         self._note_date = ""     # 当前标注对应的日期
+        # 笔记：标签条 + 正文编辑，按名字存进 notes.json
+        self._notes: dict[str, str] = {}
+        self._cur_note = ""
+        self._note_tag_btns: list[QPushButton] = []
+        self._note_save_timer = QTimer(self)
+        self._note_save_timer.setSingleShot(True)
+        self._note_save_timer.setInterval(1500)
+        self._note_save_timer.timeout.connect(self._save_current_note)
+        self._notes = _load_notes_file()
         # 旧版本保存过自定义K线背景的，继续视为手动颜色，不被主题覆盖
         if (self.settings.value("chart_bg")
                 and self.settings.value("chart_bg_auto") is None):
@@ -806,6 +835,8 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(8)
+
+        lay.addWidget(self._build_note_group())
 
         grp_ai = FoldGroup("形态描述（自然语言）", self.settings, "fold_ai")
         v = QVBoxLayout(grp_ai)
@@ -993,6 +1024,200 @@ class MainWindow(QMainWindow):
         h.addWidget(b_add)
         h.addWidget(b_rm)
         return w
+
+    # ---------------- 笔记 ----------------
+    def _build_note_group(self) -> QWidget:
+        """左面板顶部笔记工具条 + 正文编辑区。
+
+        布局：
+          标签按钮（水平滚动区）... [红] 新建笔记
+          ----------------------------------------
+          正文 QPlainTextEdit（约 150 px 高）
+        """
+        grp = QGroupBox("笔记")
+        v = QVBoxLayout(grp)
+        v.setContentsMargins(9, 22, 9, 9)
+
+        # 标签条：水平放置，超出时内部滚动
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self._note_tag_row = row
+        # 先塞一个占位，_refresh_note_bar 里会重建全部标签按钮
+        self._note_tag_host = QWidget()
+        self._note_tag_host.setLayout(row)
+        self._note_tag_scroll = QScrollArea()
+        self._note_tag_scroll.setWidgetResizable(True)
+        self._note_tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._note_tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._note_tag_scroll.setFrameShape(QFrame.NoFrame)
+        self._note_tag_scroll.setFixedHeight(26)
+        self._note_tag_scroll.setWidget(self._note_tag_host)
+
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.addWidget(self._note_tag_scroll, stretch=1)
+
+        self.btn_new_note = QPushButton("新建笔记")
+        self.btn_new_note.setObjectName("danger")
+        self.btn_new_note.setCursor(Qt.PointingHandCursor)
+        self.btn_new_note.setToolTip("新建一个可命名的笔记，点击左侧标签可切换")
+        self.btn_new_note.clicked.connect(self._on_new_note)
+        wrap.addWidget(self.btn_new_note)
+
+        v.addLayout(wrap)
+
+        self.ed_note = QPlainTextEdit()
+        self.ed_note.setPlaceholderText(
+            "还没有笔记，点右侧「新建笔记」开始记录吧…")
+        self.ed_note.setMaximumHeight(160)
+        self.ed_note.setContextMenuPolicy(Qt.DefaultContextMenu)
+        self.ed_note.textChanged.connect(self._on_note_text_changed)
+        v.addWidget(self.ed_note)
+
+        self._refresh_note_bar()
+        return grp
+
+    def _refresh_note_bar(self):
+        """重建标签按钮列表并选中当前笔记。"""
+        # 清掉旧按钮
+        for b in self._note_tag_btns:
+            self._note_tag_row.removeWidget(b)
+            b.setParent(None)
+            b.deleteLater()
+        self._note_tag_btns.clear()
+
+        names = list(self._notes.keys())
+        names.sort()     # 按名字排序，避免新建一个跑到队尾
+        for name in names:
+            b = QPushButton(name)
+            b.setObjectName("note_tag")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(f"切换到笔记「{name}」\n双击重命名 / 右键删除")
+            b.clicked.connect(lambda _c=False, n=name: self._switch_to_note(n))
+            b.mouseDoubleClickEvent = (
+                lambda _ev, n=name: self._rename_note(n))
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(
+                lambda pos, n=name, btn=b:
+                    self._on_note_tag_menu(pos, n, btn))
+            self._note_tag_row.addWidget(b)
+            self._note_tag_btns.append(b)
+
+        self._note_tag_row.addStretch(1)
+        self._update_tag_checked()
+
+    def _update_tag_checked(self):
+        for b in self._note_tag_btns:
+            b.setChecked(b.text() == self._cur_note)
+
+    def _on_new_note(self):
+        """弹框让用户命名新建笔记。"""
+        name, ok = QInputDialog.getText(
+            self, "新建笔记", "笔记名称：", echo=QLineEdit.Normal)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.information(self, "笔记", "名字不能为空。")
+            return
+        if name in self._notes:
+            QMessageBox.information(self, "笔记", f"已存在「{name}」。")
+            return
+        self._notes[name] = ""
+        self._refresh_note_bar()
+        self._switch_to_note(name)
+        self.statusBar().showMessage(f"已新建笔记「{name}」")
+
+    def _on_note_text_changed(self):
+        """正文变化，延迟保存；切换笔记时已 blockSignals，不会误触发。"""
+        if not self._cur_note:
+            return
+        self._note_save_timer.start()   # 重启 1.5s 定时器
+
+    def _switch_to_note(self, name: str | None):
+        """切换当前笔记：先把旧笔记内容存起来，再载入新笔记。"""
+        self._save_current_note()
+        if not name or name not in self._notes:
+            self._cur_note = ""
+            self.ed_note.blockSignals(True)
+            self.ed_note.clear()
+            self.ed_note.blockSignals(False)
+            self.ed_note.setPlaceholderText(
+                "还没有笔记，点右侧「新建笔记」开始记录吧…")
+            self._update_tag_checked()
+            return
+        self._cur_note = name
+        self.ed_note.blockSignals(True)
+        self.ed_note.setPlainText(self._notes.get(name, ""))
+        self.ed_note.blockSignals(False)
+        self.ed_note.setPlaceholderText("")
+        self._update_tag_checked()
+
+    def _rename_note(self, old_name: str):
+        if old_name not in self._notes:
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "重命名笔记", "新名称：", text=old_name)
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == old_name:
+            return
+        if new_name in self._notes:
+            QMessageBox.information(self, "笔记", f"已存在「{new_name}」。")
+            return
+        content = self._notes.pop(old_name)
+        self._notes[new_name] = content
+        if self._cur_note == old_name:
+            self._cur_note = new_name
+        _write_notes_file(self._notes)
+        self._refresh_note_bar()
+        self.statusBar().showMessage(
+            f"笔记「{old_name}」已重命名为「{new_name}」")
+
+    def _delete_note(self, name: str):
+        if name not in self._notes:
+            return
+        reply = QMessageBox.question(
+            self, "删除笔记",
+            f"确定删除笔记「{name}」？此操作无法撤销。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self._notes.pop(name, None)
+        _write_notes_file(self._notes)
+        self._refresh_note_bar()
+        if self._cur_note == name:
+            remaining = list(self._notes.keys())
+            remaining.sort()
+            self._switch_to_note(remaining[0] if remaining else None)
+        self.statusBar().showMessage(f"笔记「{name}」已删除")
+
+    def _on_note_tag_menu(self, pos, name: str, btn: QPushButton):
+        """笔记标签右键菜单。"""
+        menu = QMenu(self)
+        act_rename = menu.addAction("重命名")
+        act_delete = menu.addAction("删除")
+        act = menu.exec(btn.mapToGlobal(pos))
+        if act is None:
+            return
+        if act is act_rename:
+            self._rename_note(name)
+        elif act is act_delete:
+            self._delete_note(name)
+
+    def _save_current_note(self):
+        """把当前编辑中的正文写回 self._notes（暂不写文件，统一在 save_all 写）。"""
+        self._note_save_timer.stop()
+        if self._cur_note:
+            self._notes[self._cur_note] = self.ed_note.toPlainText()
+
+    def _save_all_notes(self):
+        """先保存当前笔记，再整体写文件。"""
+        self._save_current_note()
+        _write_notes_file(self._notes)
 
     def _on_pool_changed(self, i: int):
         all_a = self.cb_pool.itemText(i) == "全部A股"
@@ -2520,6 +2745,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", str(e))
 
     def closeEvent(self, event):
+        self._save_all_notes()
         self.settings.setValue("win_geometry", self.saveGeometry())
         self.settings.setValue("splitter_state", self._splitter.saveState())
         if self._cur_draw_code:
