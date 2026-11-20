@@ -3,14 +3,13 @@
 流程：
   1) 打包主程序 → dist/KLinePicker/（onedir，启动快）
   2) 将主程序目录压成 build/app_payload.zip
-  3) 打包安装器 → dist/KLinePicker_Setup_v1.0.0.exe（单文件）
+  3) 打包安装器 → dist/KLinePicker_Setup_v1.3.5.exe（单文件）
 
-用法：双击 打包安装包.bat，或 .venv\\Scripts\\python.exe build_installer.py
+用法：双击 打包安装包.bat，或 python build_installer.py
 """
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -62,9 +61,11 @@ def build_installer() -> None:
 
 
 def main() -> None:
-    if shutil.which("pyinstaller") is None and not os.path.exists(
-            os.path.join(HERE, ".venv", "Scripts", "pyinstaller.exe")):
-        raise SystemExit("未安装 PyInstaller：先执行 .venv\\Scripts\\pip install pyinstaller")
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        raise SystemExit("未安装 PyInstaller：先执行 "
+                         "python -m pip install -r requirements.txt")
     build_app()
     zip_payload()
     build_installer()

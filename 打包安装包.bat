@@ -4,7 +4,10 @@ cd /d "%~dp0"
 echo ============================================
 echo   K线形态选股器 - 打包安装包
 echo ============================================
-".venv\Scripts\python.exe" build_installer.py
+rem 优先用项目虚拟环境，没有就用系统 Python
+set "PY=python"
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+"%PY%" build_installer.py
 if errorlevel 1 (
   echo.
   echo 打包失败，请查看上方错误信息。
@@ -12,5 +15,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo 安装包已生成：dist\KLinePicker_Setup_v1.0.0.exe
+echo 安装包已生成：dist\KLinePicker_Setup_*.exe
 pause
