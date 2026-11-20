@@ -166,10 +166,17 @@ QPushButton#danger {{ background: #e5484d; color: #ffffff;
 QPushButton#danger:hover {{ background: #f55a5f; border-color: #f55a5f; }}
 QPushButton#danger:pressed {{ background: #b93b40; border-color: #b93b40; }}
 
-/* 笔记标签：虚线胶囊，选中变主题强调色 */
+/* 笔记栏：贴在窗口最右侧 */
+QWidget#note_panel {{ background: {panel2};
+    border-left: 1px solid {border}; }}
+QLabel#note_title {{ color: {sub}; font-weight: 600; }}
+QScrollArea#note_tag_scroll {{ background: transparent; border: none; }}
+QScrollArea#note_tag_scroll QWidget {{ background: transparent; }}
+
+/* 笔记标签：竖排、左对齐，选中变主题强调色 */
 QPushButton#note_tag {{ background: transparent; color: {sub};
-    border: 1px dashed {border}; border-radius: 11px;
-    padding: 2px 10px; font-size: 8pt; }}
+    border: 1px dashed {border}; border-radius: 6px;
+    padding: 5px 9px; font-size: 9pt; text-align: left; }}
 QPushButton#note_tag:hover {{ color: {text};
     border: 1px solid {accent}; }}
 QPushButton#note_tag:checked {{ background: {accent}; color: #ffffff;

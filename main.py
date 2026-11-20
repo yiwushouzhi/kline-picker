@@ -652,10 +652,11 @@ class MainWindow(QMainWindow):
         self._probe_want = ""    # 待探测日期（用户连续改日期时只保留最后一次）
         self._probe_cur = ""     # 正在探测的日期
         self._note_date = ""     # 当前标注对应的日期
-        # 笔记：标签条 + 正文编辑，按名字存进 notes.json
+        # 笔记：右侧竖排标签栏，正文编辑区点开后出现，按名字存进 notes.json
         self._notes: dict[str, str] = {}
         self._cur_note = ""
         self._note_tag_btns: list[QPushButton] = []
+        self._note_prev_width = 170      # 收起编辑区时恢复的右栏宽度
         self._note_save_timer = QTimer(self)
         self._note_save_timer.setSingleShot(True)
         self._note_save_timer.setInterval(1500)
@@ -673,9 +674,11 @@ class MainWindow(QMainWindow):
         self._left_panel = self._build_left()
         splitter.addWidget(self._left_panel)
         splitter.addWidget(self._build_right())
-        splitter.setSizes([420, 860])
+        splitter.addWidget(self._build_note_panel())
+        splitter.setSizes([420, 860, 170])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
         self._migrate_palette()
         self._apply_ma_config()
         self.chart.set_draw_width(
@@ -835,8 +838,6 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(8)
-
-        lay.addWidget(self._build_note_group())
 
         grp_ai = FoldGroup("形态描述（自然语言）", self.settings, "fold_ai")
         v = QVBoxLayout(grp_ai)
@@ -1026,65 +1027,106 @@ class MainWindow(QMainWindow):
         return w
 
     # ---------------- 笔记 ----------------
-    def _build_note_group(self) -> QWidget:
-        """左面板顶部笔记工具条 + 正文编辑区。
+    def _build_note_panel(self) -> QWidget:
+        """窗口最右侧的笔记栏。
 
-        布局：
-          标签按钮（水平滚动区）... [红] 新建笔记
-          ----------------------------------------
-          正文 QPlainTextEdit（约 150 px 高）
+        标签竖排；正文编辑区默认隐藏，点标签或新建笔记后才展开。
         """
-        grp = QGroupBox("笔记")
-        v = QVBoxLayout(grp)
-        v.setContentsMargins(9, 22, 9, 9)
+        w = QWidget()
+        w.setObjectName("note_panel")
+        w.setAttribute(Qt.WA_StyledBackground, True)
+        w.setMinimumWidth(150)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
 
-        # 标签条：水平放置，超出时内部滚动
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
-        self._note_tag_row = row
-        # 先塞一个占位，_refresh_note_bar 里会重建全部标签按钮
-        self._note_tag_host = QWidget()
-        self._note_tag_host.setLayout(row)
-        self._note_tag_scroll = QScrollArea()
-        self._note_tag_scroll.setWidgetResizable(True)
-        self._note_tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._note_tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._note_tag_scroll.setFrameShape(QFrame.NoFrame)
-        self._note_tag_scroll.setFixedHeight(26)
-        self._note_tag_scroll.setWidget(self._note_tag_host)
-
-        wrap = QHBoxLayout()
-        wrap.setContentsMargins(0, 0, 0, 0)
-        wrap.addWidget(self._note_tag_scroll, stretch=1)
+        lb_title = QLabel("笔记")
+        lb_title.setObjectName("note_title")
+        v.addWidget(lb_title)
 
         self.btn_new_note = QPushButton("新建笔记")
         self.btn_new_note.setObjectName("danger")
         self.btn_new_note.setCursor(Qt.PointingHandCursor)
-        self.btn_new_note.setToolTip("新建一个可命名的笔记，点击左侧标签可切换")
+        self.btn_new_note.setToolTip("新建一个可命名的笔记")
         self.btn_new_note.clicked.connect(self._on_new_note)
-        wrap.addWidget(self.btn_new_note)
+        v.addWidget(self.btn_new_note)
 
-        v.addLayout(wrap)
+        # 标签竖排，超出时内部滚动
+        self._note_tag_row = QVBoxLayout()
+        self._note_tag_row.setContentsMargins(0, 0, 0, 0)
+        self._note_tag_row.setSpacing(4)
+        self._note_tag_host = QWidget()
+        self._note_tag_host.setLayout(self._note_tag_row)
+        self._note_tag_scroll = QScrollArea()
+        self._note_tag_scroll.setObjectName("note_tag_scroll")
+        self._note_tag_scroll.setWidgetResizable(True)
+        self._note_tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._note_tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._note_tag_scroll.setFrameShape(QFrame.NoFrame)
+        self._note_tag_scroll.setWidget(self._note_tag_host)
+        v.addWidget(self._note_tag_scroll, stretch=1)
+
+        # 正文编辑区：默认不显示，点标签后出现
+        self._note_edit_box = QWidget()
+        ev = QVBoxLayout(self._note_edit_box)
+        ev.setContentsMargins(0, 6, 0, 0)
+        ev.setSpacing(4)
+
+        hrow = QHBoxLayout()
+        hrow.setContentsMargins(0, 0, 0, 0)
+        self.lb_note_title = QLabel("")
+        self.lb_note_title.setObjectName("note_title")
+        btn_collapse = QPushButton("收起")
+        btn_collapse.setFixedHeight(20)
+        btn_collapse.setCursor(Qt.PointingHandCursor)
+        btn_collapse.setToolTip("收起笔记编辑区")
+        btn_collapse.clicked.connect(self._hide_note_editor)
+        hrow.addWidget(self.lb_note_title, stretch=1)
+        hrow.addWidget(btn_collapse)
+        ev.addLayout(hrow)
 
         self.ed_note = QPlainTextEdit()
-        self.ed_note.setPlaceholderText(
-            "还没有笔记，点右侧「新建笔记」开始记录吧…")
-        self.ed_note.setMaximumHeight(160)
+        self.ed_note.setPlaceholderText("在这里记录…")
         self.ed_note.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.ed_note.textChanged.connect(self._on_note_text_changed)
-        v.addWidget(self.ed_note)
+        ev.addWidget(self.ed_note, stretch=1)
+
+        self._note_edit_box.setVisible(False)
+        v.addWidget(self._note_edit_box, stretch=2)
 
         self._refresh_note_bar()
-        return grp
+        return w
+
+    def _show_note_editor(self):
+        """展开编辑区；右栏太窄时顺带加宽。"""
+        self._note_edit_box.setVisible(True)
+        sizes = self._splitter.sizes()
+        if len(sizes) == 3 and sizes[2] < 330:
+            if sizes[2] > 0:
+                self._note_prev_width = sizes[2]
+            sizes[2] = 340
+            self._splitter.setSizes(sizes)
+        self.lb_note_title.setText(self._cur_note)
+
+    def _hide_note_editor(self):
+        """收起编辑区并恢复原来的右栏宽度。"""
+        self._save_current_note()
+        self._note_edit_box.setVisible(False)
+        self.lb_note_title.setText("")
+        sizes = self._splitter.sizes()
+        if len(sizes) == 3:
+            sizes[2] = min(self._note_prev_width or 170, 240)
+            self._splitter.setSizes(sizes)
 
     def _refresh_note_bar(self):
         """重建标签按钮列表并选中当前笔记。"""
-        # 清掉旧按钮
-        for b in self._note_tag_btns:
-            self._note_tag_row.removeWidget(b)
-            b.setParent(None)
-            b.deleteLater()
+        # 清掉旧按钮和旧弹簧，否则新标签会被之前的弹簧挤到底部
+        while self._note_tag_row.count():
+            item = self._note_tag_row.takeAt(0)
+            old = item.widget()
+            if old is not None:
+                old.setParent(None)
+                old.deleteLater()
         self._note_tag_btns.clear()
 
         names = list(self._notes.keys())
@@ -1094,7 +1136,7 @@ class MainWindow(QMainWindow):
             b.setObjectName("note_tag")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setToolTip(f"切换到笔记「{name}」\n双击重命名 / 右键删除")
+            b.setToolTip(f"「{name}」\n单击编辑 / 双击重命名 / 右键删除")
             b.clicked.connect(lambda _c=False, n=name: self._switch_to_note(n))
             b.mouseDoubleClickEvent = (
                 lambda _ev, n=name: self._rename_note(n))
@@ -1128,6 +1170,7 @@ class MainWindow(QMainWindow):
         self._notes[name] = ""
         self._refresh_note_bar()
         self._switch_to_note(name)
+        self.ed_note.setFocus()
         self.statusBar().showMessage(f"已新建笔记「{name}」")
 
     def _on_note_text_changed(self):
@@ -1144,15 +1187,14 @@ class MainWindow(QMainWindow):
             self.ed_note.blockSignals(True)
             self.ed_note.clear()
             self.ed_note.blockSignals(False)
-            self.ed_note.setPlaceholderText(
-                "还没有笔记，点右侧「新建笔记」开始记录吧…")
+            self._hide_note_editor()
             self._update_tag_checked()
             return
         self._cur_note = name
         self.ed_note.blockSignals(True)
         self.ed_note.setPlainText(self._notes.get(name, ""))
         self.ed_note.blockSignals(False)
-        self.ed_note.setPlaceholderText("")
+        self._show_note_editor()
         self._update_tag_checked()
 
     def _rename_note(self, old_name: str):
